@@ -1,0 +1,2 @@
+# Build output - publish the exe through GitHub Releases instead of committing it
+*.exe
