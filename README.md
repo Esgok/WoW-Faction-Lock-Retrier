@@ -28,6 +28,7 @@ No installation is needed. There are two versions:
 - On each attempt it clicks Finish, then watches that pixel for up to 10 seconds.
   - **Color matches:** the popup is back, so the faction is still locked. It clicks Okay and waits for the configured interval.
   - **Color doesn't match:** the popup didn't appear. It assumes success and stops, so it never clicks blindly on the character select screen.
+- **Safety checks:** before every click it makes sure the World of Warcraft window is in front, not minimized, and that no other window covers the Finish/Okay buttons. A minimized game is restored automatically. If WoW can't be brought to the front, the attempt is skipped (and logged) instead of clicking whatever is on screen, and a missing popup is never counted as success unless WoW was visible while it checked.
 
 ## Requirements
 
@@ -47,7 +48,7 @@ No installation is needed. There are two versions:
 
 When the popup stops appearing, the app beeps, flashes its window and shows a message.
 
-While it runs it controls the mouse, so don't use the PC for anything else.
+While it runs it controls the mouse, so don't use the PC for anything else. The game can't run fully in the background: if you switch to another window, attempts pause ("Skipped: ...") until WoW is back in front.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -75,7 +76,9 @@ Run `build.bat`. It compiles `src/WowFactionLockRetrier.cs` with `csc.exe` from 
 ## Troubleshooting
 
 - **"The Okay color is still visible" / "same color is read with the popup closed"**: the point you picked looks the same with and without the popup. Recapture Okay on the solid red part of the button.
-- **Clicks don't register**: make sure the game window is visible and not minimized. The app brings the window titled "World of Warcraft" to the front before each attempt.
+- **"Skipped: another window is in front of WoW"**: Windows sometimes refuses to bring a window to the front while you're using another app. Click on the game once, and leave the PC alone while it runs.
+- **"Skipped: another window covers the button"**: something (often this app's own window, when "Keep this window on top" is on) sits over the Finish or Okay button. Move it aside.
+- **"Skipped: WoW window not found"**: the app looks for a window whose title contains "World of Warcraft". Make sure the game is running.
 - **It stops right away, but no character was created**: the server may take longer than 10 seconds to respond, or the color check failed. Try windowed mode, recalibrate, or raise the tolerance.
 - **It never stops, even after the faction opens**: lower the tolerance and recalibrate.
 - **Windows SmartScreen or antivirus warns about the exe**: the exe is unsigned and moves the mouse, which some antivirus heuristics flag. You can read the source and build it yourself with `build.bat`, or use the PowerShell version.

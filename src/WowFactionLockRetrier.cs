@@ -13,7 +13,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("WoW Faction Lock Retrier")]
 [assembly: System.Reflection.AssemblyProduct("WoW Faction Lock Retrier")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
 
 static class Native
 {
@@ -43,19 +43,51 @@ static class Native
         mouse_event(0x0004, 0, 0, 0, IntPtr.Zero);                      // left up
     }
 
-    public static void FocusWoW()
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    const int SW_RESTORE = 9;
+    const uint GA_ROOT = 2;
+
+    public static IntPtr FindWoW()
     {
         foreach (Process p in Process.GetProcesses())
         {
             try
             {
-                if (p.MainWindowTitle.IndexOf("World of Warcraft", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    SetForegroundWindow(p.MainWindowHandle); Thread.Sleep(300); return;
-                }
+                if (p.MainWindowHandle != IntPtr.Zero &&
+                    p.MainWindowTitle.IndexOf("World of Warcraft", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return p.MainWindowHandle;
             }
             catch { }
         }
+        return IntPtr.Zero;
+    }
+
+    // Is WoW in front, not minimized, and actually the window under each of the given points?
+    // Returns null if everything is fine, otherwise the reason it isn't.
+    public static string CheckWoW(params Point[] points)
+    {
+        IntPtr h = FindWoW();
+        if (h == IntPtr.Zero) return "WoW window not found";
+        if (IsIconic(h)) return "WoW is minimized";
+        if (GetForegroundWindow() != h) return "another window is in front of WoW";
+        foreach (Point p in points)
+            if (GetAncestor(WindowFromPoint(p), GA_ROOT) != h)
+                return string.Format("another window covers the button at ({0}, {1})", p.X, p.Y);
+        return null;
+    }
+
+    // Restore and bring WoW to the front, then verify. Returns null on success, otherwise the reason.
+    public static string EnsureWoW(params Point[] points)
+    {
+        IntPtr h = FindWoW();
+        if (h == IntPtr.Zero) return "WoW window not found";
+        if (IsIconic(h)) { ShowWindow(h, SW_RESTORE); Thread.Sleep(800); }
+        if (GetForegroundWindow() != h) { SetForegroundWindow(h); Thread.Sleep(300); }
+        return CheckWoW(points);
     }
 }
 
@@ -223,6 +255,12 @@ class MainForm : Form
 
     void StartRun()
     {
+        if (Native.FindWoW() == IntPtr.Zero)
+        {
+            MessageBox.Show(this, "No window titled 'World of Warcraft' was found. Start the game first.",
+                Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         if (Matches(Native.GetColor(okayPos.Value), okayColor))
         {
             MessageBox.Show(this, "The popup seems to be open right now (or the Okay color is not distinctive). Close the popup or recapture Okay, then try again.",
@@ -250,6 +288,8 @@ class MainForm : Form
 
     class RunConfig { public Point Okay, Finish; public Color OkayColor; public int IntervalMs, MaxAttempts; }
 
+    const int SkipRetryMs = 5000;
+
     // Returns true if a stop was requested during the wait.
     bool Wait(int ms) { return stopEvent.WaitOne(ms); }
 
@@ -263,11 +303,21 @@ class MainForm : Form
             Status("Running...");
             while (!stopRequested)
             {
+                // Safety: only click when WoW is in front, not minimized, and nothing covers the buttons.
+                string why = Native.EnsureWoW(c.Finish, c.Okay);
+                if (why != null)
+                {
+                    Log(string.Format("Skipped: {0}. Checking again in {1} s.", why, SkipRetryMs / 1000));
+                    Status("Paused: " + why + ". Bring WoW to the front (and keep it uncovered).");
+                    if (Wait(SkipRetryMs)) break;
+                    continue;
+                }
+
                 attempt++;
                 int a = attempt;
                 Ui(delegate { lblAttempts.Text = "Attempts: " + a; });
+                Status("Running...");
 
-                Native.FocusWoW();
                 Native.ClickAt(c.Finish);
                 Native.SetCursorPos(c.Finish.X, c.Finish.Y - 200);
 
@@ -282,6 +332,14 @@ class MainForm : Form
 
                 if (!blocked)
                 {
+                    // Only trust "no popup" if WoW was still visible in front the whole time we looked.
+                    why = Native.CheckWoW(c.Finish, c.Okay);
+                    if (why != null)
+                    {
+                        Log(string.Format("Attempt #{0}: result unknown ({1}). Not counting it as success.", attempt, why));
+                        if (Wait(SkipRetryMs)) break;
+                        continue;
+                    }
                     success = true;
                     result = "Popup did NOT appear - your character may have been created!";
                     Log(string.Format("Attempt #{0}: popup did not appear. Stopping.", attempt));
@@ -289,8 +347,17 @@ class MainForm : Form
                 }
 
                 Log(string.Format("Attempt #{0}: still locked, retrying in {1} s.", attempt, c.IntervalMs / 1000));
-                Native.ClickAt(c.Okay);
-                Native.SetCursorPos(c.Okay.X, c.Okay.Y - 200);
+                why = Native.EnsureWoW(c.Okay);
+                if (why != null)
+                {
+                    // Don't click blindly; the next round closes the popup once WoW is back in front.
+                    Log(string.Format("Skipped clicking Okay: {0}.", why));
+                }
+                else
+                {
+                    Native.ClickAt(c.Okay);
+                    Native.SetCursorPos(c.Okay.X, c.Okay.Y - 200);
+                }
 
                 if (c.MaxAttempts > 0 && attempt >= c.MaxAttempts) { result = "Maximum number of attempts reached."; break; }
                 Status(string.Format("Waiting {0} s before the next attempt...", c.IntervalMs / 1000));

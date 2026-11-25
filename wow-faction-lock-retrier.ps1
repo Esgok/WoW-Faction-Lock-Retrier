@@ -23,6 +23,11 @@ public static class W {
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr h, IntPtr dc);
     [DllImport("gdi32.dll")]  public static extern uint GetPixel(IntPtr dc, int x, int y);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
 }
 "@
@@ -46,10 +51,30 @@ function Countdown([string]$msg, [int]$sec = 6) {
     for ($i = $sec; $i -gt 0; $i--) { Write-Host "  $i..." -NoNewline; Start-Sleep 1 }
     Write-Host ""
 }
-function Focus-WoW {
-    $p = Get-Process | Where-Object { $_.MainWindowTitle -like "*World of Warcraft*" } | Select-Object -First 1
-    if ($p) { [W]::SetForegroundWindow($p.MainWindowHandle) | Out-Null; Start-Sleep -Milliseconds 300 }
+function Find-WoW {
+    $p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*World of Warcraft*" } | Select-Object -First 1
+    if ($p) { $p.MainWindowHandle } else { [IntPtr]::Zero }
 }
+# Is WoW in front, not minimized, and actually the window under each point? Returns $null if OK, else the reason.
+function Test-WoW($points) {
+    $h = Find-WoW
+    if ($h -eq [IntPtr]::Zero) { return "WoW window not found" }
+    if ([W]::IsIconic($h)) { return "WoW is minimized" }
+    if ([W]::GetForegroundWindow() -ne $h) { return "another window is in front of WoW" }
+    foreach ($pt in $points) {
+        if ([W]::GetAncestor([W]::WindowFromPoint($pt), 2) -ne $h) { return "another window covers the button at ($($pt.X),$($pt.Y))" }
+    }
+    $null
+}
+# Restore and bring WoW to the front, then verify.
+function Ensure-WoW($points) {
+    $h = Find-WoW
+    if ($h -eq [IntPtr]::Zero) { return "WoW window not found" }
+    if ([W]::IsIconic($h)) { [W]::ShowWindow($h, 9) | Out-Null; Start-Sleep -Milliseconds 800 }
+    if ([W]::GetForegroundWindow() -ne $h) { [W]::SetForegroundWindow($h) | Out-Null; Start-Sleep -Milliseconds 300 }
+    Test-WoW $points
+}
+$SkipRetrySec = 5
 
 Write-Host "=== Calibration ===" -ForegroundColor Cyan
 Write-Host "The game must be in WINDOWED or 'Windowed (Fullscreen)' mode (pixel colors may not be readable in exclusive fullscreen)."
@@ -74,8 +99,15 @@ if (Test-Color (Get-Color $okay.X $okay.Y) $okayColor) {
 Write-Host "`n=== Starting (every $IntervalSec s). Press Ctrl+C to stop ===`n" -ForegroundColor Cyan
 $attempt = 0
 while ($true) {
+    # Safety: only click when WoW is in front, not minimized, and nothing covers the buttons.
+    $why = Ensure-WoW @($finish, $okay)
+    if ($why) {
+        Write-Host ("[{0:HH:mm:ss}] Skipped: {1}. Checking again in {2} s." -f (Get-Date), $why, $SkipRetrySec) -ForegroundColor DarkYellow
+        Start-Sleep -Seconds $SkipRetrySec
+        continue
+    }
+
     $attempt++
-    Focus-WoW
     Click-At $finish.X $finish.Y
     [W]::SetCursorPos($finish.X, $finish.Y - 200) | Out-Null   # move cursor off the buttons
 
@@ -87,14 +119,27 @@ while ($true) {
     }
 
     if (-not $blocked) {
+        # Only trust "no popup" if WoW was still visible in front while we looked.
+        $why = Test-WoW @($finish, $okay)
+        if ($why) {
+            Write-Host ("[{0:HH:mm:ss}] Attempt #{1}: result unknown ({2}). Not counting it as success." -f (Get-Date), $attempt, $why) -ForegroundColor DarkYellow
+            Start-Sleep -Seconds $SkipRetrySec
+            continue
+        }
         Write-Host ("[{0:HH:mm:ss}] Attempt #{1}: popup did NOT appear - the character may have been created! Stopping." -f (Get-Date), $attempt) -ForegroundColor Green
         1..5 | ForEach-Object { [console]::Beep(880, 300); Start-Sleep -Milliseconds 150 }
         break
     }
 
     Write-Host ("[{0:HH:mm:ss}] Attempt #{1}: still locked, retrying in {2} s." -f (Get-Date), $attempt, $IntervalSec)
-    Click-At $okay.X $okay.Y
-    [W]::SetCursorPos($okay.X, $okay.Y - 200) | Out-Null
+    $why = Ensure-WoW @($okay)
+    if ($why) {
+        # Don't click blindly; the next round closes the popup once WoW is back in front.
+        Write-Host ("[{0:HH:mm:ss}] Skipped clicking Okay: {1}." -f (Get-Date), $why) -ForegroundColor DarkYellow
+    } else {
+        Click-At $okay.X $okay.Y
+        [W]::SetCursorPos($okay.X, $okay.Y - 200) | Out-Null
+    }
 
     if ($MaxAttempts -gt 0 -and $attempt -ge $MaxAttempts) { Write-Host "Maximum number of attempts reached."; break }
     Start-Sleep -Seconds $IntervalSec
